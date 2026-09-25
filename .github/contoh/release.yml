@@ -1,7 +1,7 @@
 name: Build & Rilis Modul
 
 # Wrapper tipis — logika ada di reusable workflow:
-# OpenSID/.github/actions/release-modul-action.yml
+# OpenSID/.github/.github/actions/release-modul-action.yml
 #
 # Cara pakai:
 # 1. Set secret IONCUBE_DOWNLOAD_URL di repo modul ini.
@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   rilis:
-    uses: OpenSID/.github/actions/release-modul-action.yml@main
+    uses: OpenSID/.github/.github/actions/release-modul-action.yml@main
     with:
       version: ${{ inputs.version }}
       prerelease: ${{ inputs.prerelease }}
