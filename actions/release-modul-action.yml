@@ -1,0 +1,261 @@
+name: Release Modul (Reusable via gh CLI)
+
+# Reusable workflow untuk semua modul OpenSID.
+# Lokasi: OpenSID/.github/actions/release-modul-action.yml
+# Pemakaian dari repo modul:
+#   uses: OpenSID/.github/actions/release-modul-action.yml@main
+#
+# Wajib set secret di repo modul: IONCUBE_DOWNLOAD_URL
+# Rilis dibuat murni dengan `gh` CLI (tanpa softprops/action-gh-release).
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Versi rilis, misal 2607.0.1. Format YYMM.minor.patch (awalan v opsional)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Jika true, rilis sebagai pra-rilis.'
+        required: false
+        default: false
+        type: boolean
+      php_target:
+        description: 'Target versi PHP IonCube tanpa titik, misal 84 untuk PHP 8.4'
+        required: false
+        default: '84'
+        type: string
+      arch:
+        description: 'Arsitektur target IonCube'
+        required: false
+        default: 'x86-64'
+        type: string
+      encode_dirs:
+        description: 'Daftar direktori (spasi) yang ditimpa hasil encode ke output'
+        required: false
+        default: 'Config Enums Helpers Http Libraries Models Providers Routes Services Traits'
+        type: string
+      ignore_dirs:
+        description: 'Daftar direktori (spasi) yang di-ignore IonCube agar tidak terenkripsi'
+        required: false
+        default: 'Views/ Storage/ Database/'
+        type: string
+      notes_file:
+        description: 'File catatan rilis untuk body release'
+        required: false
+        default: 'catatan_rilis.md'
+        type: string
+      runner:
+        description: 'Runner untuk job build'
+        required: false
+        default: 'ubuntu-22.04'
+        type: string
+      target_commitish:
+        description: 'Commit/branch target tag. Kosongkan = SHA pemanggil.'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      IONCUBE_DOWNLOAD_URL:
+        description: 'URL download IonCube Encoder (secret di repo modul)'
+        required: true
+
+  # Opsional: boleh di-dispatch langsung dari repo .github untuk test manual.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Masukkan versi rilis, misal 2607.0.1. Format YYMM.minor.patch'
+        required: true
+      prerelease:
+        description: 'Rilis terbatas untuk pengujian — jika dicentang, rilis sebagai pra-rilis.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ${{ inputs.runner }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # ── 1. Validasi versi ───────────────────────────────────────
+      - name: Validasi versi
+        id: version
+        run: |
+          RAW="${{ inputs.version }}"
+          TAG="v${RAW#v}"
+
+          if ! echo "$TAG" | grep -qE '^v[0-9]{4}\.[0-9]+\.[0-9]+$'; then
+            echo "❌ Format tag tidak valid: $TAG"
+            echo "   Format yang benar: vYYMM.minor.patch (contoh: v2607.0.1)"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "✅ Format tag valid: $TAG"
+
+          {
+            echo "### 🎯 Informasi Rilis"
+            echo "- **Tag:** \`$TAG\`"
+            echo "- **Repo:** \`${{ github.repository }}\`"
+            echo "- **Branch/SHA pemanggil:** \`${{ github.ref_name }} / ${{ github.sha }}\`"
+            echo "- **Actor:** \`@${{ github.actor }}\`"
+            echo "- **Prerelease:** ${{ inputs.prerelease }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 2. Checkout source (repo pemanggil) ─────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          # Saat dipanggil via workflow_call, checkout otomatis mengarah
+          # ke repo pemanggil, bukan repo OpenSID/.github.
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+
+      # ── 3. Export clean source ──────────────────────────────────
+      - name: Export clean source
+        run: |
+          set -e
+          git archive HEAD --format=zip -o clean-source.zip
+          rm -rf source && mkdir -p source
+          unzip -q clean-source.zip -d source/
+          echo "✅ Clean source exported"
+
+      # ── 4. Setup IonCube Encoder ────────────────────────────────
+      - name: Setup IonCube Encoder
+        run: |
+          set -e
+          if [ -z "${{ secrets.IONCUBE_DOWNLOAD_URL }}" ]; then
+            echo "❌ Secret IONCUBE_DOWNLOAD_URL belum diset di repo modul."
+            exit 1
+          fi
+          curl -fsSL "${{ secrets.IONCUBE_DOWNLOAD_URL }}" -o ioncube.tar.gz
+          tar -xzf ioncube.tar.gz
+          ENCODER_DIR=$(find . -maxdepth 1 -type d -name "ioncube*" | head -1)
+          ENCODER_SH="$PWD/$ENCODER_DIR/ioncube_encoder.sh"
+          chmod +x "$ENCODER_SH"
+          echo "ENCODER=$ENCODER_SH" >> "$GITHUB_ENV"
+          echo "✅ IonCube Encoder siap"
+
+      # ── 5. Aktivasi lisensi ─────────────────────────────────────
+      - name: Aktivasi lisensi
+        run: ${{ env.ENCODER }} --activate
+
+      # ── 6. Encode source (parametris) ───────────────────────────
+      - name: Encode source
+        id: encode
+        continue-on-error: true
+        run: |
+          set -e
+          IGNORE_ARGS=""
+          # shellcheck disable=SC2086
+          for ign in ${{ inputs.ignore_dirs }}; do
+            IGNORE_ARGS="$IGNORE_ARGS --ignore '$ign'"
+          done
+          echo "Ignore args:$IGNORE_ARGS"
+          # shellcheck disable=SC2086
+          eval "${{ env.ENCODER }} -${{ inputs.php_target }} -${{ inputs.arch }} \
+            source -o encoded \
+            --create-target \
+            --no-doc-comments \
+            $IGNORE_ARGS \
+            --optimize more --license-check auto"
+
+      # ── 7. Deaktivasi lisensi (selalu dijalankan) ───────────────
+      - name: Deaktivasi lisensi
+        if: always()
+        run: ${{ env.ENCODER }} --deactivate
+
+      # ── 8. Verifikasi encoding ──────────────────────────────────
+      - name: Verifikasi encoding
+        run: |
+          if [ "${{ steps.encode.outcome }}" != "success" ]; then
+            echo "❌ IonCube encoding gagal!"
+            exit 1
+          fi
+          echo "✅ IonCube encoding berhasil (PHP target: ${{ inputs.php_target }})"
+
+      # ── 9. Rakit output ─────────────────────────────────────────
+      - name: Rakit output
+        run: |
+          set -e
+          rm -rf output && mkdir -p output/
+          cp -r source/. output/
+          # shellcheck disable=SC2086
+          for dir in ${{ inputs.encode_dirs }}; do
+            if [ -d "encoded/$dir" ]; then
+              mkdir -p "output/$dir"
+              cp -r "encoded/$dir/." "output/$dir/"
+            fi
+          done
+          echo "${{ steps.version.outputs.tag }}" > output/VERSION
+          echo "✅ Output dirakit"
+
+      # ── 10. Buat ZIP ────────────────────────────────────────────
+      - name: Buat ZIP
+        run: |
+          set -e
+          rm -f clean-source.zip ioncube-encrypted.zip
+          zip -r clean-source.zip source/
+          zip -r ioncube-encrypted.zip output/
+          {
+            echo "### 📦 Hasil Build"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -lh ./*.zip
+
+      # ── 11. Buat GitHub Release via gh CLI ──────────────────────
+      - name: Buat GitHub Release (gh CLI)
+        run: |
+          set -e
+          TAG="${{ steps.version.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          MODUL_NAME="${REPO##*/}"
+          NOTES_FILE="${{ inputs.notes_file }}"
+          TARGET="${{ inputs.target_commitish }}"
+          if [ -z "$TARGET" ]; then
+            TARGET="${{ github.sha }}"
+          fi
+
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "⚠️ File $NOTES_FILE tidak ditemukan, pakai body otomatis."
+            {
+              echo "# Rilis $MODUL_NAME $TAG"
+              echo ""
+              echo "Modul: $MODUL_NAME"
+              echo "Tag: $TAG"
+              echo "Target: $TARGET"
+            } > /tmp/release-notes.md
+            NOTES_FILE="/tmp/release-notes.md"
+          fi
+
+          echo "### 🚀 GitHub Release (gh CLI)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Target:** \`$TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Notes:** \`$NOTES_FILE\`" >> "$GITHUB_STEP_SUMMARY"
+          gh --version
+
+          if gh release view "$TAG" --json tagName --jq .tagName 2>/dev/null | grep -qx "$TAG"; then
+            echo "ℹ️ Release $TAG sudah ada — upload ulang asset dengan --clobber."
+            gh release upload "$TAG" clean-source.zip ioncube-encrypted.zip --clobber
+            # Sinkronkan flag prerelease jika berubah
+            if [ "${{ inputs.prerelease }}" = "true" ]; then
+              gh release edit "$TAG" --prerelease --notes-file "$NOTES_FILE" || true
+            else
+              gh release edit "$TAG" --latest --notes-file "$NOTES_FILE" || true
+            fi
+          else
+            CREATE_ARGS=(--title "Rilis $MODUL_NAME $TAG" --notes-file "$NOTES_FILE" --target "$TARGET")
+            if [ "${{ inputs.prerelease }}" = "true" ]; then
+              CREATE_ARGS+=(--prerelease)
+            else
+              CREATE_ARGS+=(--latest)
+            fi
+            gh release create "$TAG" clean-source.zip ioncube-encrypted.zip "${CREATE_ARGS[@]}"
+          fi
+
+          echo "✅ Release $TAG berhasil diproses via gh CLI"
+          gh release view "$TAG" --json tagName,name,isPrerelease,url --jq '{tag, nama: .name, prerelease: .isPrerelease, url}' || true

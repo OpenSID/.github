@@ -1,0 +1,37 @@
+name: Build & Rilis Modul
+
+# Wrapper tipis — logika ada di reusable workflow:
+# OpenSID/.github/actions/release-modul-action.yml
+#
+# Cara pakai:
+# 1. Set secret IONCUBE_DOWNLOAD_URL di repo modul ini.
+# 2. Pastikan catatan_rilis.md ada (dipakai sebagai body release).
+# 3. Jalankan manual via Actions > Build & Rilis Modul > Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Masukkan versi rilis, misal 2607.0.1. Format YYMM.minor.patch'
+        required: true
+      prerelease:
+        description: 'Rilis terbatas untuk pengujian — jika dicentang, rilis sebagai pra-rilis.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  rilis:
+    uses: OpenSID/.github/actions/release-modul-action.yml@main
+    with:
+      version: ${{ inputs.version }}
+      prerelease: ${{ inputs.prerelease }}
+      # Opsional, uncomment jika perlu custom:
+      # php_target: '84'
+      # encode_dirs: 'Config Enums Helpers Http Libraries Models Providers Routes Services Traits'
+      # ignore_dirs: 'Views/ Storage/ Database/'
+      # notes_file: 'catatan_rilis.md'
+    secrets:
+      IONCUBE_DOWNLOAD_URL: ${{ secrets.IONCUBE_DOWNLOAD_URL }}
