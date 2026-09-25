@@ -1,9 +1,9 @@
 name: Release Modul (Reusable via gh CLI)
 
 # Reusable workflow untuk semua modul OpenSID.
-# Lokasi: OpenSID/.github/actions/release-modul-action.yml
+# Lokasi: OpenSID/.github/.github/actions/release-modul-action.yml
 # Pemakaian dari repo modul:
-#   uses: OpenSID/.github/actions/release-modul-action.yml@main
+#   uses: OpenSID/.github/.github/actions/release-modul-action.yml@main
 #
 # Wajib set secret di repo modul: IONCUBE_DOWNLOAD_URL
 # Rilis dibuat murni dengan `gh` CLI (tanpa softprops/action-gh-release).
