@@ -196,11 +196,13 @@ jobs:
           echo "✅ Output dirakit"
 
       # ── 10. Buat ZIP ────────────────────────────────────────────
+      #   Hanya ioncube-encrypted.zip yang dirilis — clean-source.zip tidak
+      #   perlu karena GitHub otomatis melampirkan Source code (zip/tar.gz).
+      #   clean-source.zip dari step Export dihapus agar tak ikut ter-upload.
       - name: Buat ZIP
         run: |
           set -e
           rm -f clean-source.zip ioncube-encrypted.zip
-          zip -r clean-source.zip source/
           zip -r ioncube-encrypted.zip output/
           {
             echo "### 📦 Hasil Build"
@@ -241,7 +243,7 @@ jobs:
 
           if gh release view "$TAG" --json tagName --jq .tagName 2>/dev/null | grep -qx "$TAG"; then
             echo "ℹ️ Release $TAG sudah ada — upload ulang asset dengan --clobber."
-            gh release upload "$TAG" clean-source.zip ioncube-encrypted.zip --clobber
+            gh release upload "$TAG" ioncube-encrypted.zip --clobber
             # Sinkronkan flag prerelease jika berubah
             if [ "${{ inputs.prerelease }}" = "true" ]; then
               gh release edit "$TAG" --prerelease --notes-file "$NOTES_FILE" || true
@@ -255,7 +257,7 @@ jobs:
             else
               CREATE_ARGS+=(--latest)
             fi
-            gh release create "$TAG" clean-source.zip ioncube-encrypted.zip "${CREATE_ARGS[@]}"
+            gh release create "$TAG" ioncube-encrypted.zip "${CREATE_ARGS[@]}"
           fi
 
           echo "✅ Release $TAG berhasil diproses via gh CLI"
