@@ -125,6 +125,44 @@ jobs:
           unzip -q clean-source.zip -d source/
           echo "✅ Clean source exported"
 
+      # ── 3b. Validasi versi module.json ──────────────────────────
+      #   module.json di repo modul adalah sumber kebenaran versi. Dasbor
+      #   SiapPakai menolak artefak bila `version` di module.json hasil
+      #   ekstrak tidak sama persis dengan versi rilis, jadi rilis
+      #   digagalkan di sini sebelum lisensi IonCube dipakai.
+      - name: Validasi versi module.json
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -e
+          EXPECTED="${TAG#v}"
+          MODULE_JSON="source/module.json"
+
+          if [ ! -f "$MODULE_JSON" ]; then
+            echo "::error file=module.json::module.json tidak ditemukan di root repo modul."
+            exit 1
+          fi
+
+          if ! ACTUAL=$(jq -er '.version | strings' "$MODULE_JSON"); then
+            echo "::error file=module.json::module.json tidak valid atau field \"version\" (string) tidak ada."
+            exit 1
+          fi
+
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error file=module.json::Versi module.json ($ACTUAL) tidak sama dengan versi rilis ($EXPECTED). Naikkan \"version\" di module.json menjadi \"$EXPECTED\", commit, lalu jalankan rilis lagi."
+            {
+              echo "### ❌ Versi module.json tidak cocok"
+              echo "- **module.json:** \`$ACTUAL\`"
+              echo "- **Rilis:** \`$EXPECTED\`"
+              echo ""
+              echo "Naikkan \`version\` di \`module.json\` menjadi \`$EXPECTED\` di repo modul, commit, lalu jalankan rilis lagi."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "- **module.json:** \`$ACTUAL\` ✅" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Versi module.json ($ACTUAL) sesuai dengan tag $TAG"
+
       # ── 4. Setup IonCube Encoder ────────────────────────────────
       - name: Setup IonCube Encoder
         run: |
