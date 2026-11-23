@@ -7,6 +7,9 @@ name: Release Modul (Reusable via gh CLI)
 #   uses: OpenSID/.github/.github/workflows/release-modul-action.yml@main
 #
 # Wajib set secret di repo modul: IONCUBE_DOWNLOAD_URL
+# `version` di module.json otomatis dinaikkan sesuai input versi: bila
+# berbeda, workflow meng-commit dan push module.json ke branch pemanggil,
+# lalu tag rilis dibuat dari commit tersebut.
 # Rilis dibuat murni dengan `gh` CLI (tanpa softprops/action-gh-release).
 
 on:
@@ -116,6 +119,73 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
 
+      # ── 2b. Sinkronkan versi module.json ────────────────────────
+      #   Dasbor SiapPakai menolak artefak bila `version` di module.json
+      #   hasil ekstrak tidak sama persis dengan versi rilis. Bila berbeda,
+      #   versi ditulis ke module.json, di-commit, dan di-push ke branch
+      #   pemanggil agar repo, tag, dan artefak selalu berisi versi sama.
+      #   Tag rilis lalu dibuat dari commit tersebut.
+      - name: Sinkronkan versi module.json
+        id: bump
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -e
+          EXPECTED="${TAG#v}"
+          MODULE_JSON="module.json"
+
+          if [ ! -f "$MODULE_JSON" ]; then
+            echo "::error file=module.json::module.json tidak ditemukan di root repo modul."
+            exit 1
+          fi
+
+          if ! CURRENT=$(jq -er '.version | strings' "$MODULE_JSON"); then
+            echo "::error file=module.json::module.json tidak valid atau field \"version\" (string) tidak ada."
+            exit 1
+          fi
+
+          if [ "$CURRENT" = "$EXPECTED" ]; then
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "✅ module.json sudah versi $EXPECTED, tidak perlu diubah"
+            exit 0
+          fi
+
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error file=module.json::Versi module.json ($CURRENT) berbeda dengan rilis ($EXPECTED), tetapi workflow tidak dijalankan dari branch ($REF_TYPE $BRANCH) sehingga perubahan tidak bisa di-push. Jalankan dari branch, atau naikkan versi manual."
+            exit 1
+          fi
+
+          # Ganti hanya baris "version" agar format file lain tetap utuh.
+          cp "$MODULE_JSON" /tmp/module.json.orig
+          CURRENT_RE=$(printf '%s' "$CURRENT" | sed 's/[][\.*^$/]/\\&/g')
+          sed -i -E "s/^([[:space:]]*\"version\"[[:space:]]*:[[:space:]]*)\"${CURRENT_RE}\"/\1\"${EXPECTED}\"/" "$MODULE_JSON"
+
+          # Pastikan hanya field version yang berubah; bila tidak, tulis ulang dengan jq.
+          if [ "$(jq -r '.version' "$MODULE_JSON")" != "$EXPECTED" ] \
+            || [ "$(jq -S 'del(.version)' /tmp/module.json.orig)" != "$(jq -S 'del(.version)' "$MODULE_JSON")" ]; then
+            echo "ℹ️ Penggantian per baris gagal, tulis ulang module.json dengan jq."
+            jq --indent 4 --arg v "$EXPECTED" '.version = $v' /tmp/module.json.orig > "$MODULE_JSON"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$MODULE_JSON"
+          git commit -m "chore(rilis): naikkan versi module.json ke $EXPECTED"
+          git --no-pager show --stat HEAD
+
+          if ! git push origin "HEAD:refs/heads/$BRANCH"; then
+            echo "::error::Gagal push perubahan module.json ke branch $BRANCH. Kemungkinan branch sudah maju (ada commit baru atau ini re-run) atau branch dilindungi. Jalankan workflow rilis baru dari ujung branch terbaru."
+            exit 1
+          fi
+
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "- **module.json:** \`$CURRENT\` → \`$EXPECTED\` (commit \`$(git rev-parse --short HEAD)\` di \`$BRANCH\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ module.json dinaikkan dari $CURRENT ke $EXPECTED dan di-push ke $BRANCH"
+
       # ── 3. Export clean source ──────────────────────────────────
       - name: Export clean source
         run: |
@@ -126,10 +196,8 @@ jobs:
           echo "✅ Clean source exported"
 
       # ── 3b. Validasi versi module.json ──────────────────────────
-      #   module.json di repo modul adalah sumber kebenaran versi. Dasbor
-      #   SiapPakai menolak artefak bila `version` di module.json hasil
-      #   ekstrak tidak sama persis dengan versi rilis, jadi rilis
-      #   digagalkan di sini sebelum lisensi IonCube dipakai.
+      #   Pemeriksaan akhir pada isi yang akan masuk ZIP, sebelum lisensi
+      #   IonCube dipakai. Seharusnya selalu lolos setelah langkah 2b.
       - name: Validasi versi module.json
         env:
           TAG: ${{ steps.version.outputs.tag }}
@@ -149,18 +217,15 @@ jobs:
           fi
 
           if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error file=module.json::Versi module.json ($ACTUAL) tidak sama dengan versi rilis ($EXPECTED). Naikkan \"version\" di module.json menjadi \"$EXPECTED\", commit, lalu jalankan rilis lagi."
+            echo "::error file=module.json::Versi module.json di artefak ($ACTUAL) tidak sama dengan versi rilis ($EXPECTED)."
             {
               echo "### ❌ Versi module.json tidak cocok"
               echo "- **module.json:** \`$ACTUAL\`"
               echo "- **Rilis:** \`$EXPECTED\`"
-              echo ""
-              echo "Naikkan \`version\` di \`module.json\` menjadi \`$EXPECTED\` di repo modul, commit, lalu jalankan rilis lagi."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          echo "- **module.json:** \`$ACTUAL\` ✅" >> "$GITHUB_STEP_SUMMARY"
           echo "✅ Versi module.json ($ACTUAL) sesuai dengan tag $TAG"
 
       # ── 4. Setup IonCube Encoder ────────────────────────────────
@@ -257,7 +322,13 @@ jobs:
           MODUL_NAME="${REPO##*/}"
           NOTES_FILE="${{ inputs.notes_file }}"
           TARGET="${{ inputs.target_commitish }}"
-          if [ -z "$TARGET" ]; then
+          if [ "${{ steps.bump.outputs.bumped }}" = "true" ]; then
+            # Tag wajib menunjuk commit yang module.json-nya sudah dinaikkan.
+            if [ -n "$TARGET" ]; then
+              echo "::warning::target_commitish ($TARGET) diabaikan karena module.json baru dinaikkan; tag diarahkan ke commit ${{ steps.bump.outputs.sha }}."
+            fi
+            TARGET="${{ steps.bump.outputs.sha }}"
+          elif [ -z "$TARGET" ]; then
             TARGET="${{ github.sha }}"
           fi
 
