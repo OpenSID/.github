@@ -9,7 +9,9 @@ name: Release Modul (Reusable via gh CLI)
 # Wajib set secret di repo modul: IONCUBE_DOWNLOAD_URL
 # `version` di module.json otomatis dinaikkan sesuai input versi: bila
 # berbeda, workflow meng-commit dan push module.json ke branch pemanggil,
-# lalu tag rilis dibuat dari commit tersebut.
+# lalu tag rilis dibuat dari commit tersebut. Versi tidak pernah diturunkan.
+# Bila tag sudah ada, artefak dibangun dari commit tag (tanpa bump) dan
+# rilis gagal bila module.json di tag tidak sama dengan versinya.
 # Rilis dibuat murni dengan `gh` CLI (tanpa softprops/action-gh-release).
 
 on:
@@ -119,13 +121,15 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
 
-      # ── 2b. Sinkronkan versi module.json ────────────────────────
+      # ── 2b. Cek tag & sinkronkan versi module.json ──────────────
       #   Dasbor SiapPakai menolak artefak bila `version` di module.json
-      #   hasil ekstrak tidak sama persis dengan versi rilis. Bila berbeda,
-      #   versi ditulis ke module.json, di-commit, dan di-push ke branch
-      #   pemanggil agar repo, tag, dan artefak selalu berisi versi sama.
-      #   Tag rilis lalu dibuat dari commit tersebut.
-      - name: Sinkronkan versi module.json
+      #   hasil ekstrak tidak sama persis dengan versi rilis.
+      #   - Tag sudah ada: tidak ada bump/push. Build dari commit tag; gagal
+      #     bila module.json di tag tidak sama dengan versi rilis.
+      #   - Tag belum ada: bila berbeda, versi ditulis ke module.json,
+      #     di-commit, dan di-push ke branch pemanggil. Tag rilis lalu dibuat
+      #     dari commit tersebut agar repo, tag, dan artefak selalu sama.
+      - name: Cek tag & sinkronkan versi module.json
         id: bump
         env:
           TAG: ${{ steps.version.outputs.tag }}
@@ -135,6 +139,23 @@ jobs:
           set -e
           EXPECTED="${TAG#v}"
           MODULE_JSON="module.json"
+
+          # Cek apakah tag sudah ada di repo modul (exit 2 = tidak ada).
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null
+          RC=$?
+          set -e
+          case "$RC" in
+            0) TAG_EXISTS=true ;;
+            2) TAG_EXISTS=false ;;
+            *) echo "::error::Gagal memeriksa tag $TAG di origin (git ls-remote exit $RC)."; exit 1 ;;
+          esac
+
+          if [ "$TAG_EXISTS" = "true" ]; then
+            git fetch -q --depth=1 origin "+refs/tags/$TAG:refs/tags/$TAG"
+            git checkout -q --detach "refs/tags/$TAG^{commit}"
+            echo "ℹ️ Tag $TAG sudah ada di commit $(git rev-parse HEAD) — build dari tag, tanpa bump."
+          fi
 
           if [ ! -f "$MODULE_JSON" ]; then
             echo "::error file=module.json::module.json tidak ditemukan di root repo modul."
@@ -146,11 +167,40 @@ jobs:
             exit 1
           fi
 
+          if [ "$TAG_EXISTS" = "true" ] && [ "$CURRENT" != "$EXPECTED" ]; then
+            echo "::error file=module.json::Tag $TAG sudah ada, tetapi module.json di tag tersebut berisi versi $CURRENT (bukan $EXPECTED). Tag yang sudah ada tidak diubah. Hapus rilis dan tag $TAG lalu jalankan ulang, atau rilis dengan versi baru."
+            {
+              echo "### ❌ Tag sudah ada dengan module.json berbeda"
+              echo "- **Tag:** \`$TAG\` (\`$(git rev-parse --short HEAD)\`)"
+              echo "- **module.json di tag:** \`$CURRENT\`"
+              echo ""
+              echo "Hapus rilis dan tag \`$TAG\` lalu jalankan ulang, atau rilis dengan versi baru."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
           if [ "$CURRENT" = "$EXPECTED" ]; then
+            echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
             echo "bumped=false" >> "$GITHUB_OUTPUT"
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            if [ "$TAG_EXISTS" = "true" ]; then
+              echo "- **Tag sudah ada:** artefak dibangun ulang dari \`$(git rev-parse --short HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+            fi
             echo "✅ module.json sudah versi $EXPECTED, tidak perlu diubah"
             exit 0
+          fi
+
+          # Jangan turunkan versi: bila module.json sudah lebih baru dari versi
+          # rilis (mis. hotfix versi lama dijalankan dari master), gagalkan.
+          if echo "$CURRENT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            && [ "$(printf '%s\n%s\n' "$CURRENT" "$EXPECTED" | sort -V | tail -n1)" = "$CURRENT" ]; then
+            echo "::error file=module.json::Versi rilis ($EXPECTED) lebih lama dari versi module.json ($CURRENT) di $BRANCH. Versi tidak diturunkan. Gunakan versi rilis lebih baru dari $CURRENT, atau untuk hotfix versi lama jalankan dari branch yang module.json-nya masih versi lama."
+            {
+              echo "### ❌ Versi rilis lebih lama dari module.json"
+              echo "- **module.json:** \`$CURRENT\`"
+              echo "- **Rilis:** \`$EXPECTED\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
 
           if [ "$REF_TYPE" != "branch" ]; then
@@ -181,6 +231,7 @@ jobs:
             exit 1
           fi
 
+          echo "tag_exists=false" >> "$GITHUB_OUTPUT"
           echo "bumped=true" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "- **module.json:** \`$CURRENT\` → \`$EXPECTED\` (commit \`$(git rev-parse --short HEAD)\` di \`$BRANCH\`)" >> "$GITHUB_STEP_SUMMARY"
@@ -322,10 +373,11 @@ jobs:
           MODUL_NAME="${REPO##*/}"
           NOTES_FILE="${{ inputs.notes_file }}"
           TARGET="${{ inputs.target_commitish }}"
-          if [ "${{ steps.bump.outputs.bumped }}" = "true" ]; then
-            # Tag wajib menunjuk commit yang module.json-nya sudah dinaikkan.
+          if [ "${{ steps.bump.outputs.bumped }}" = "true" ] || [ "${{ steps.bump.outputs.tag_exists }}" = "true" ]; then
+            # Tag wajib menunjuk commit yang module.json-nya sesuai: commit bump,
+            # atau commit tag yang sudah ada (artefak dibangun dari sana).
             if [ -n "$TARGET" ]; then
-              echo "::warning::target_commitish ($TARGET) diabaikan karena module.json baru dinaikkan; tag diarahkan ke commit ${{ steps.bump.outputs.sha }}."
+              echo "::warning::target_commitish ($TARGET) diabaikan; tag diarahkan ke commit ${{ steps.bump.outputs.sha }}."
             fi
             TARGET="${{ steps.bump.outputs.sha }}"
           elif [ -z "$TARGET" ]; then
