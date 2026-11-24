@@ -39,5 +39,6 @@ jobs:
     #   larastan-level: 5
     #   e2e: true
     #   test-layout: 'auto'
+    #   app-key: 'base64:...'  # hanya bila kunci tes core (schema.sql) berubah
     secrets:
       CORE_PAT: ${{ secrets.CORE_PAT }}

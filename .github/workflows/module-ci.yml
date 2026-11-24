@@ -84,6 +84,11 @@ on:
         required: false
         default: 'auto'
         type: string
+      app-key:
+        description: 'APP_KEY aplikasi tes. Harus sama dengan config.app_key di schema.sql/seed.sql dan phpunit.xml.dist core; bila berbeda, admin dialihkan ke halaman koneksi database.'
+        required: false
+        default: 'base64:/2PUGKKo+G4EqZ84quM4sVXS2oogaxOKjW136Rl1pHY='
+        type: string
     secrets:
       CORE_PAT:
         description: 'Token baca repo core dan repo modul dependensi.'
@@ -199,7 +204,7 @@ jobs:
       MODULE_NAME: ${{ needs.plan.outputs.module }}
       APP_ENV: testing
       CI_ENV: testing
-      APP_KEY: 'base64:/2PUGKKo+G4EqZ84quM4sVXS2oogaxOKjW136Rl1pHY='
+      APP_KEY: ${{ inputs.app-key }}
       DEBUGBAR_ENABLED: 'false'
       DB_CONNECTION: default
       DB_HOST: 127.0.0.1
