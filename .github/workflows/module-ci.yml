@@ -315,6 +315,7 @@ jobs:
           cp phpunit.xml.dist phpunit.xml
 
       - name: Provisi DB tes
+        id: provisi
         run: bash "$RUNNER_TEMP/provisi-db.sh"
 
       - name: Siapkan tes modul
@@ -387,7 +388,9 @@ jobs:
           fi
 
       - name: Larastan
-        if: inputs.larastan
+        # Tiap lapis tetap melapor walau lapis lain merah; cukup syaratkan
+        # penyiapan core berhasil.
+        if: ${{ !cancelled() && inputs.larastan && steps.provisi.outcome == 'success' }}
         env:
           LEVEL: ${{ inputs.larastan-level }}
         run: |
@@ -411,7 +414,7 @@ jobs:
 
       - name: Cek spec e2e modul
         id: e2e
-        if: inputs.e2e && matrix.kind == 'branch'
+        if: ${{ !cancelled() && inputs.e2e && matrix.kind == 'branch' && steps.provisi.outcome == 'success' }}
         run: |
           if compgen -G "Modules/$MODULE_NAME/tests/e2e/*.spec.ts" > /dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -420,7 +423,7 @@ jobs:
           fi
 
       - name: Setup Node.js
-        if: steps.e2e.outputs.run == 'true'
+        if: ${{ !cancelled() && steps.e2e.outputs.run == 'true' }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
@@ -428,7 +431,7 @@ jobs:
           cache-dependency-path: core/package-lock.json
 
       - name: Playwright e2e modul
-        if: steps.e2e.outputs.run == 'true'
+        if: ${{ !cancelled() && steps.e2e.outputs.run == 'true' }}
         env:
           DEP_NAMES: ${{ steps.deps.outputs.names }}
         run: |
