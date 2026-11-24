@@ -1,0 +1,453 @@
+name: CI Modul (Reusable)
+
+# Reusable workflow untuk menguji modul OpenSID terhadap core (OpenSID/premium).
+# Lokasi: OpenSID/.github/.github/workflows/module-ci.yml
+# Pemakaian dari repo modul (contoh lengkap: .github/contoh/ci-modul.yml):
+#   uses: OpenSID/.github/.github/workflows/module-ci.yml@v1
+#
+# Modul tidak bisa berdiri sendiri, jadi tiap leg matriks: checkout core,
+# pasang modul di core/Modules/<name>, bundel modul dependensi, lalu jalankan
+# PHPUnit, Larastan, dan (opsional) Playwright.
+#
+# Matriks core dihitung otomatis, tidak ditulis tangan di repo modul:
+# - Branch core dari input `core-branches` (default bug-fix dan rilis-dev).
+# - `core-tags` rilis core terbaru (patch terakhir per YYMM) yang memenuhi
+#   `require.opensid-core` modul dan modul dependensinya.
+#
+# Dependensi: setiap kunci `opensid-<slug>` (selain `opensid-core`) di
+# `require` module.json diambil dari OpenSID/modul-<slug> pada
+# `dependency-ref`. Pelanggan ikut dibundel bila core memuat PenjagaAktivasi
+# (>= 2610); tanpanya setiap rute admin membalas 503.
+#
+# Letak tes (panduan lengkap: documents/panduan-pengujian-modul.md di
+# OpenSID/premium):
+# - native  : Modules/<name>/tests/{Unit,Feature} dengan namespace
+#             Modules\<name>\Tests\..., dijalankan langsung dari folder modul.
+# - overlay : pola lama, namespace Tests\..., berkas disalin ke tests/ core.
+#             Hanya untuk transisi; pindahkan ke native saat menyentuh tes.
+# `test-layout: auto` memilih overlay bila ada satu saja berkas ber-namespace
+# Tests\ di tests/{Unit,Feature}, selain itu native.
+#
+# Secret wajib di repo modul: CORE_PAT (akses baca OpenSID/premium dan repo
+# modul dependensi, termasuk OpenSID/modul-pelanggan).
+
+on:
+  workflow_call:
+    inputs:
+      core-repository:
+        description: 'Repo core yang diuji.'
+        required: false
+        default: 'OpenSID/premium'
+        type: string
+      core-branches:
+        description: 'Array JSON branch core yang selalu diuji, misal ["rilis-dev"]. [] = tanpa branch.'
+        required: false
+        default: '["bug-fix", "rilis-dev"]'
+        type: string
+      core-tags:
+        description: 'Jumlah rilis core terbaru yang memenuhi require.opensid-core. 0 = tanpa tag.'
+        required: false
+        default: 2
+        type: number
+      dependency-ref:
+        description: 'Branch repo modul dependensi (Pelanggan, Anjungan, dll.).'
+        required: false
+        default: 'rilis-dev'
+        type: string
+      php-version:
+        description: 'Versi PHP.'
+        required: false
+        default: '8.4'
+        type: string
+      phpunit:
+        description: 'Jalankan tes PHPUnit modul.'
+        required: false
+        default: true
+        type: boolean
+      larastan:
+        description: 'Jalankan Larastan atas kode modul.'
+        required: false
+        default: true
+        type: boolean
+      larastan-level:
+        description: 'Level Larastan untuk kode modul.'
+        required: false
+        default: 5
+        type: number
+      e2e:
+        description: 'Jalankan spec Playwright tests/e2e/*.spec.ts (hanya leg branch core).'
+        required: false
+        default: true
+        type: boolean
+      test-layout:
+        description: 'Letak tes PHPUnit: auto, native, atau overlay.'
+        required: false
+        default: 'auto'
+        type: string
+    secrets:
+      CORE_PAT:
+        description: 'Token baca repo core dan repo modul dependensi.'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Rencana matriks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      module: ${{ steps.module.outputs.name }}
+      deps: ${{ steps.module.outputs.deps }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout modul
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Baca module.json
+        id: module
+        run: |
+          # shellcheck disable=SC2016 # kode PHP sengaja dalam kutip tunggal
+          php -r '
+            $m = json_decode(file_get_contents("module.json"), true, 512, JSON_THROW_ON_ERROR);
+            if (empty($m["name"])) { fwrite(STDERR, "module.json tidak punya name\n"); exit(1); }
+            $deps = [];
+            foreach (array_keys($m["require"] ?? []) as $key) {
+              if ($key !== "opensid-core" && str_starts_with($key, "opensid-")) {
+                $deps[] = substr($key, strlen("opensid-"));
+              }
+            }
+            file_put_contents(getenv("GITHUB_OUTPUT"), "name={$m["name"]}\ndeps=" . json_encode($deps) . "\n", FILE_APPEND);
+          '
+          cat "$GITHUB_OUTPUT"
+
+      - name: Hitung matriks core
+        id: matrix
+        env:
+          GH_TOKEN: ${{ secrets.CORE_PAT }}
+          CORE_REPO: ${{ inputs.core-repository }}
+          CORE_BRANCHES: ${{ inputs.core-branches }}
+          CORE_TAGS: ${{ inputs.core-tags }}
+          DEPS: ${{ steps.module.outputs.deps }}
+          DEP_REF: ${{ inputs.dependency-ref }}
+        run: |
+          # Constraint core dari modul ini dan setiap dependensinya: tag core
+          # harus memenuhi semuanya, karena dependensi ikut dipasang.
+          : > "$RUNNER_TEMP/manifests"
+          cp module.json "$RUNNER_TEMP/manifest-self.json"
+          echo "$RUNNER_TEMP/manifest-self.json" >> "$RUNNER_TEMP/manifests"
+          for slug in $(jq -r '.[]' <<< "$DEPS"); do
+            gh api "repos/OpenSID/modul-$slug/contents/module.json?ref=$DEP_REF" --jq .content \
+              | base64 -d > "$RUNNER_TEMP/manifest-$slug.json"
+            echo "$RUNNER_TEMP/manifest-$slug.json" >> "$RUNNER_TEMP/manifests"
+          done
+
+          TAGS=""
+          if [ "$CORE_TAGS" -gt 0 ]; then
+            TAGS=$(gh api "repos/$CORE_REPO/tags" --paginate --jq '.[].name' \
+              | grep -E '^v[0-9]{4}\.[0-9]+\.[0-9]+$' || true)
+          fi
+
+          # shellcheck disable=SC2016 # kode PHP sengaja dalam kutip tunggal
+          printf '%s\n' "$TAGS" | php -r '
+            $limit = (int) getenv("CORE_TAGS");
+            $constraints = [];
+            foreach (file(getenv("RUNNER_TEMP") . "/manifests", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $file) {
+              $m = json_decode(file_get_contents($file), true, 512, JSON_THROW_ON_ERROR);
+              $c = $m["require"]["opensid-core"] ?? trim(
+                (empty($m["min_core"]) ? "" : ">=" . $m["min_core"]) . " " . (empty($m["max_core"]) ? "" : "<=" . $m["max_core"])
+              );
+              if (preg_match("/[|^~*]/", $c)) { fwrite(STDERR, "Hanya constraint >=, <=, >, <, = yang didukung: $c ($file)\n"); exit(1); }
+              preg_match_all("/(>=|<=|>|<|==|=)?\s*v?([0-9][0-9.]*)/", $c, $parts, PREG_SET_ORDER);
+              foreach ($parts as $p) { $constraints[] = [$p[1] === "" || $p[1] === "=" ? "==" : $p[1], $p[2]]; }
+            }
+
+            $latest = [];
+            foreach (file("php://stdin", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $tag) {
+              $v = substr($tag, 1);
+              $series = explode(".", $v)[0];
+              if (! isset($latest[$series]) || version_compare($v, $latest[$series], ">")) { $latest[$series] = $v; }
+            }
+            $ok = array_values(array_filter($latest, function ($v) use ($constraints) {
+              foreach ($constraints as [$op, $bound]) { if (! version_compare($v, $bound, $op)) { return false; } }
+              return true;
+            }));
+            usort($ok, "version_compare");
+            $tags = $limit > 0 ? array_slice($ok, -$limit) : [];
+
+            $include = [];
+            foreach ($tags as $v) { $include[] = ["core-ref" => "v$v", "kind" => "tag"]; }
+            foreach (json_decode(getenv("CORE_BRANCHES"), true, 512, JSON_THROW_ON_ERROR) as $b) { $include[] = ["core-ref" => $b, "kind" => "branch"]; }
+            if ($include === []) { fwrite(STDERR, "Matriks kosong: tidak ada tag core yang cocok dan core-branches kosong.\n"); exit(1); }
+
+            file_put_contents(getenv("GITHUB_OUTPUT"), "matrix=" . json_encode(["include" => $include]) . "\n", FILE_APPEND);
+            echo "Constraint core: ", json_encode($constraints), PHP_EOL, "Matriks: ", json_encode($include, JSON_PRETTY_PRINT), PHP_EOL;
+          '
+
+  test:
+    name: Core ${{ matrix.core-ref }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      MODULE_NAME: ${{ needs.plan.outputs.module }}
+      APP_ENV: testing
+      CI_ENV: testing
+      APP_KEY: 'base64:/2PUGKKo+G4EqZ84quM4sVXS2oogaxOKjW136Rl1pHY='
+      DEBUGBAR_ENABLED: 'false'
+      DB_CONNECTION: default
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_DATABASE: opensid_playwright
+      DB_USERNAME: user
+      DB_PASSWORD: secret
+      OPENSID_DB_DATABASE: opensid_playwright
+      MYSQL_ROOT_PASSWORD: rootpassword
+      PLAYWRIGHT_BASE_URL: 'http://127.0.0.1:8000'
+      PLAYWRIGHT_AUTH_USERNAME: admin
+      PLAYWRIGHT_AUTH_PASSWORD: 'Admin$123'
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: opensid_playwright
+          MYSQL_USER: user
+          MYSQL_PASSWORD: secret
+          MYSQL_ROOT_PASSWORD: rootpassword
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - name: Checkout core @ ${{ matrix.core-ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.core-repository }}
+          ref: ${{ matrix.core-ref }}
+          token: ${{ secrets.CORE_PAT }}
+          persist-credentials: false
+          path: core
+
+      - name: Checkout modul
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: core/Modules/${{ env.MODULE_NAME }}
+
+      - name: Bundel modul dependensi
+        id: deps
+        env:
+          GH_TOKEN: ${{ secrets.CORE_PAT }}
+          DEPS: ${{ needs.plan.outputs.deps }}
+          DEP_REF: ${{ inputs.dependency-ref }}
+        run: |
+          # Urutan pasang: Pelanggan lebih dulu (gerbang aktivasi), lalu
+          # dependensi sesuai urutan di module.json.
+          SLUGS=""
+          if [ "$MODULE_NAME" != "Pelanggan" ] && [ -f app/Services/Aktivasi/PenjagaAktivasi.php ]; then
+            SLUGS="pelanggan"
+          fi
+          for slug in $(jq -r '.[]' <<< "$DEPS"); do
+            case " $SLUGS " in *" $slug "*) ;; *) SLUGS="$SLUGS $slug" ;; esac
+          done
+
+          NAMES=""
+          for slug in $SLUGS; do
+            dir="$RUNNER_TEMP/modul-$slug"
+            gh repo clone "OpenSID/modul-$slug" "$dir" -- --depth 1 --branch "$DEP_REF" --quiet
+            name=$(jq -r .name "$dir/module.json")
+            if [ "$name" = "$MODULE_NAME" ]; then continue; fi
+            rm -rf "$dir/.git"
+            mv "$dir" "Modules/$name"
+            NAMES="$NAMES $name"
+            echo "Bundel OpenSID/modul-$slug@$DEP_REF -> Modules/$name"
+          done
+          echo "names=${NAMES# }" >> "$GITHUB_OUTPUT"
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ inputs.php-version }}
+          extensions: pdo_mysql, gd, zip, intl, mbstring, bcmath, tokenizer, ctype, dom
+          coverage: none
+          tools: composer
+
+      - name: Lokasi cache Composer
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-php${{ inputs.php-version }}-${{ hashFiles('core/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-php${{ inputs.php-version }}-
+
+      - name: Composer install
+        run: composer install --no-progress --prefer-dist --no-interaction
+
+      - name: Siapkan skrip provisi DB
+        run: |
+          # Dipakai dua kali: sebelum PHPUnit dan sebelum Playwright (PHPUnit
+          # mengubah isi DB lewat RefreshDatabase).
+          cat > "$RUNNER_TEMP/provisi-db.sh" <<'SH'
+          set -euo pipefail
+          mysql -h "$DB_HOST" -P "$DB_PORT" -u root -p"$MYSQL_ROOT_PASSWORD" \
+            -e "DROP DATABASE IF EXISTS \`$DB_DATABASE\`; CREATE DATABASE \`$DB_DATABASE\`;"
+          mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < tests/playwright/storage/database/schema.sql
+          mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < tests/playwright/storage/database/seed.sql
+          unzip -oq tests/playwright/storage/database/desa.zip -d .
+          php artisan opensid:setup
+          SH
+          # phpunit.xml melewati gerbang IonCube di public/index.php untuk php -S.
+          cp phpunit.xml.dist phpunit.xml
+
+      - name: Provisi DB tes
+        run: bash "$RUNNER_TEMP/provisi-db.sh"
+
+      - name: Siapkan tes modul
+        id: tests
+        if: inputs.phpunit
+        env:
+          LAYOUT: ${{ inputs.test-layout }}
+        run: |
+          MOD_TESTS="Modules/$MODULE_NAME/tests"
+          if [ "$LAYOUT" = "auto" ]; then
+            # Satu berkas ber-namespace Tests\ cukup untuk memilih overlay:
+            # berkas itu bisa bergantung pada kelas bantu di tests/ core.
+            if grep -rlqs --include='*.php' '^namespace Tests' "$MOD_TESTS/Unit" "$MOD_TESTS/Feature"; then
+              LAYOUT=overlay
+            elif find "$MOD_TESTS/Unit" "$MOD_TESTS/Feature" -name '*Test.php' 2>/dev/null | grep -q .; then
+              LAYOUT=native
+            else
+              LAYOUT=none
+            fi
+          fi
+          echo "Letak tes: $LAYOUT"
+          echo "layout=$LAYOUT" >> "$GITHUB_OUTPUT"
+          if [ "$LAYOUT" = "none" ]; then exit 0; fi
+
+          # Peta autoload untuk kelas bantu Modules\<name>\Tests\. Modul
+          # ber-src/ juga dipetakan core saat boot (ModuleAutoloader), tetapi
+          # PHPUnit memuat kelas tes sebelum aplikasi di-boot, dan modul lama
+          # (tanpa src/) tidak dipetakan sama sekali.
+          # shellcheck disable=SC2016 # kode PHP sengaja dalam kutip tunggal
+          php -r '
+            $f = "composer.json";
+            $c = json_decode(file_get_contents($f), true, 512, JSON_THROW_ON_ERROR);
+            $c["autoload-dev"]["psr-4"]["Modules\\" . getenv("MODULE_NAME") . "\\Tests\\"] = "Modules/" . getenv("MODULE_NAME") . "/tests/";
+            file_put_contents($f, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+          '
+
+          case "$LAYOUT" in
+            overlay)
+              echo "::warning title=Tes modul pola lama::Tes $MODULE_NAME memakai pola overlay (namespace Tests). Pindahkan ke pola native (lihat documents/panduan-pengujian-modul.md)."
+              : > "$RUNNER_TEMP/overlay-files"
+              for suite in Unit Feature; do
+                if [ -d "$MOD_TESTS/$suite" ]; then
+                  mkdir -p "tests/$suite"
+                  while read -r f; do
+                    if [ -e "tests/$suite/$f" ]; then
+                      echo "::error::tests/$suite/$f sudah ada di core; overlay akan menimpanya. Ganti nama berkas atau pindah ke pola native."
+                      exit 1
+                    fi
+                  done < <(cd "$MOD_TESTS/$suite" && find . -name '*.php' -printf "%P\n")
+                  cp -R "$MOD_TESTS/$suite/." "tests/$suite/"
+                  (cd "$MOD_TESTS/$suite" && find . -name '*Test.php' -printf "tests/$suite/%P\n") >> "$RUNNER_TEMP/overlay-files"
+                fi
+              done
+              ;;
+          esac
+          composer dump-autoload --no-interaction --quiet
+
+      - name: PHPUnit
+        if: inputs.phpunit && steps.tests.outputs.layout != 'none'
+        run: |
+          if [ "${{ steps.tests.outputs.layout }}" = "native" ]; then
+            DIRS=()
+            for suite in Unit Feature; do
+              if [ -d "Modules/$MODULE_NAME/tests/$suite" ]; then DIRS+=("Modules/$MODULE_NAME/tests/$suite"); fi
+            done
+            vendor/bin/phpunit "${DIRS[@]}"
+          else
+            mapfile -t FILES < "$RUNNER_TEMP/overlay-files"
+            vendor/bin/phpunit "${FILES[@]}"
+          fi
+
+      - name: Larastan
+        if: inputs.larastan
+        env:
+          LEVEL: ${{ inputs.larastan-level }}
+        run: |
+          # Analisis kode modul saja dengan konfigurasi core. Baseline core
+          # tidak relevan di sini, jadi entri yang tak cocok tidak dilaporkan.
+          # Modul lama boleh membawa Modules/<name>/phpstan-baseline.neon.
+          M="Modules/$MODULE_NAME"
+          {
+            echo "includes:"
+            echo "    - phpstan.neon.dist"
+            if [ -f "$M/phpstan-baseline.neon" ]; then echo "    - $M/phpstan-baseline.neon"; fi
+            echo "parameters:"
+            echo "    level: $LEVEL"
+            echo "    reportUnmatchedIgnoredErrors: false"
+            echo "    excludePaths:"
+            for d in tests Tests Views resources Database database vendor node_modules rector.php; do
+              echo "        - $M/$d (?)"
+            done
+          } > phpstan-modul.neon
+          vendor/bin/phpstan analyse --configuration=phpstan-modul.neon --memory-limit=2G --no-progress --error-format=github "$M"
+
+      - name: Cek spec e2e modul
+        id: e2e
+        if: inputs.e2e && matrix.kind == 'branch'
+        run: |
+          if compgen -G "Modules/$MODULE_NAME/tests/e2e/*.spec.ts" > /dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tidak ada tests/e2e/*.spec.ts, Playwright dilewati."
+          fi
+
+      - name: Setup Node.js
+        if: steps.e2e.outputs.run == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: core/package-lock.json
+
+      - name: Playwright e2e modul
+        if: steps.e2e.outputs.run == 'true'
+        env:
+          DEP_NAMES: ${{ steps.deps.outputs.names }}
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+          # DB bersih + migrasi modul. opensid:migrasi-modul-terbundel
+          # melewati modul ber-entitlement, jadi modul ini dan dependensinya
+          # dipasang eksplisit.
+          bash "$RUNNER_TEMP/provisi-db.sh"
+          php artisan opensid:migrasi-modul-terbundel
+          for M in $DEP_NAMES "$MODULE_NAME"; do
+            echo "opensid:module $M --migrasi=up"
+            php artisan opensid:module "$M" --migrasi=up --no-report -n
+          done
+
+          # Spec harus self-contained: baca PLAYWRIGHT_* sendiri dan tidak
+          # mengimpor fixture core, karena lokasi salinan ini detail CI.
+          DEST=tests/playwright/e2e/regression/modul-terpasang
+          mkdir -p "$DEST"
+          cp "Modules/$MODULE_NAME"/tests/e2e/*.spec.ts "$DEST/"
+          npx playwright test e2e/regression/modul-terpasang --reporter=line
