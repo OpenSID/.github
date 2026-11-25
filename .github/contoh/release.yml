@@ -6,7 +6,10 @@ name: Build & Rilis Modul
 # Cara pakai:
 # 1. Set secret IONCUBE_DOWNLOAD_URL di repo modul ini.
 # 2. Pastikan catatan_rilis.md ada (dipakai sebagai body release).
-# 3. Jalankan manual via Actions > Build & Rilis Modul > Run workflow.
+# 3. "version" di module.json dinaikkan otomatis sesuai input versi: workflow
+#    meng-commit dan push module.json ke branch ini sebelum membuat tag.
+#    Jalankan dari branch (mis. master) yang tidak dilindungi dari push bot.
+# 4. Jalankan manual via Actions > Build & Rilis Modul > Run workflow.
 
 on:
   workflow_dispatch:
