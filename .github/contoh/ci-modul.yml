@@ -1,0 +1,44 @@
+name: CI Modul
+
+# Wrapper tipis — logika ada di reusable workflow:
+# OpenSID/.github/.github/workflows/module-ci.yml
+#
+# Cara pakai:
+# 1. Salin berkas ini ke .github/workflows/ci.yml di repo modul (ganti ci.yml
+#    lama yang disalin dari pipeline/templates/ci-modul.yml).
+# 2. Set secret CORE_PAT di repo modul: akses baca OpenSID/premium dan repo
+#    modul dependensi (OpenSID/modul-pelanggan, plus modul-<slug> untuk setiap
+#    `opensid-<slug>` di `require` module.json).
+# 3. Tidak perlu MODULE_NAME atau daftar tag core: nama modul dibaca dari
+#    module.json dan matriks core dihitung dari `require.opensid-core`.
+# 4. Letak dan cara menulis tes: documents/panduan-pengujian-modul.md di
+#    OpenSID/premium.
+
+on:
+  push:
+    branches: [master, rilis-dev, bug-fix]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-modul-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    name: CI
+    uses: OpenSID/.github/.github/workflows/module-ci.yml@v1
+    # Opsional, uncomment jika perlu custom:
+    # with:
+    #   core-branches: '["bug-fix", "rilis-dev"]'
+    #   core-tags: 2
+    #   dependency-ref: 'rilis-dev'
+    #   larastan-level: 5
+    #   e2e: true
+    #   test-layout: 'auto'
+    #   app-key: 'base64:...'  # hanya bila kunci tes core (schema.sql) berubah
+    secrets:
+      CORE_PAT: ${{ secrets.CORE_PAT }}
